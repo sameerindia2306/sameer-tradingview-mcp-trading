@@ -134,9 +134,11 @@ function isDST(date) {
 }
 
 function isInSilverBulletWindow() {
-  const nyH = getNYHour();
-  return (nyH >= 3 && nyH < 4) ||   // 3–4 AM NY
-         (nyH >= 10 && nyH < 11) ||  // 10–11 AM NY
+  const nyH  = getNYHour();
+  const utcH = new Date().getUTCHours() + new Date().getUTCMinutes() / 60;
+  return (utcH >= 8 && utcH < 10) || // London open (08–10 UTC)
+         (nyH >= 3  && nyH < 4)   || // 3–4 AM NY
+         (nyH >= 10 && nyH < 11)  || // 10–11 AM NY
          (nyH >= 14 && nyH < 15);    // 2–3 PM NY
 }
 
@@ -167,7 +169,7 @@ function runSilverBulletCheck(candles) {
   const inWindow = isInSilverBulletWindow();
   const nyH      = getNYHour().toFixed(2);
 
-  check(`Silver Bullet window (3–4AM / 10–11AM / 2–3PM NY) — now ${nyH} NY`, inWindow);
+  check(`Silver Bullet window (London 08–10 UTC / 3–4AM / 10–11AM / 2–3PM NY) — now ${nyH} NY`, inWindow);
 
   const fvg = detectFVG(candles.slice(-15));
   check("Fair Value Gap detected in last 15 candles", !!fvg);
@@ -259,13 +261,19 @@ function runForexComboCheck(symbol, candles) {
   const rsi14    = calcRSI(closes, 14);
 
   // Determine active session and its pre-session range
-  const utcH = new Date().getUTCHours() + new Date().getUTCMinutes() / 60;
-  const inLondon = utcH >= 8 && utcH < 10;
-  const inNY     = utcH >= 13 && utcH < 16;
+  const utcH    = new Date().getUTCHours() + new Date().getUTCMinutes() / 60;
+  const inAsia   = symbol === "USDJPY" && utcH >= 0 && utcH < 7;  // Tokyo 00–07 UTC (USDJPY only)
+  const inLondon = utcH >= 8 && utcH < 16;                         // Full London 08–16 UTC
+  const inNY     = utcH >= 13 && utcH < 21;                        // Full NY 13–21 UTC
 
-  check("London (08–10 UTC) or NY (13–16 UTC) session", inLondon || inNY);
+  const sessionLabel = symbol === "USDJPY"
+    ? "Asia (00–07 UTC) or London (08–16 UTC) or NY (13–21 UTC)"
+    : "London (08–16 UTC) or NY (13–21 UTC)";
+  check(sessionLabel, inAsia || inLondon || inNY);
 
-  const range = inLondon
+  const range = inAsia
+    ? getPreSessionRange(candles, 0,  120)   // 22:00–00:00 UTC (pre-Asia)
+    : inLondon
     ? getPreSessionRange(candles, 8,  120)   // 06:00–08:00 UTC
     : inNY
     ? getPreSessionRange(candles, 13, 120)   // 11:00–13:00 UTC
