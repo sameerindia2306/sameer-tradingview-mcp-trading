@@ -13,6 +13,7 @@ import "dotenv/config";
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
 import { google } from "googleapis";
 import { placeMarketOrder, isConfigured } from "./ctrader.js";
+import { syncToSheets } from "./sync-sheets.js";
 import http from "http";
 
 // Health check endpoint so Railway can monitor and auto-restart if unresponsive
@@ -670,10 +671,11 @@ async function run() {
   }
 
   saveLog(log);
+  await syncToSheets().catch(err => console.log(`  ⚠️  Sheets sync failed: ${err.message}`));
   console.log("\n═══════════════════════════════════════════════════════════\n");
 }
 
-const RUN_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const RUN_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes — keeps Twelve Data under 800 credits/day (14 symbols × 48 runs = 672)
 
 async function loop() {
   await run().catch(err => console.error("Bot cycle error:", err));
