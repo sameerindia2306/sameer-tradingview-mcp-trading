@@ -662,7 +662,7 @@ async function run() {
   for (const symbol of CONFIG.symbols) {
     if (todayCount(log) >= CONFIG.maxTradesPerDay) break;
     await runSymbol(symbol, log);
-    await new Promise(r => setTimeout(r, 9000)); // 9s gap → ~7 calls/min, within free tier limit of 8
+    await new Promise(r => setTimeout(r, 5000)); // 5s gap → 14 symbols spread across ~70s, staying under 8 credits/min
   }
 
   saveLog(log);
