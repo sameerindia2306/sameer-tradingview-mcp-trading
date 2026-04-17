@@ -11,7 +11,6 @@
 
 import "dotenv/config";
 import { readFileSync, writeFileSync, existsSync, appendFileSync } from "fs";
-import { google } from "googleapis";
 import { placeMarketOrder, isConfigured } from "./ctrader.js";
 import { syncToSheets } from "./sync-sheets.js";
 import http from "http";
@@ -34,8 +33,6 @@ const CONFIG = {
 const CSV_FILE = process.env.TRADE_LOG_PATH || "C:/Users/spathan/Desktop/sameer-trades.csv";
 const POSITIONS_FILE = "open-positions.json";
 const LOG_FILE       = "safety-check-log.json";
-const SHEET_ID       = process.env.GOOGLE_SHEET_ID;
-const SHEET_NAME     = "Sameer Trades";
 
 // Symbol → Twelve Data format
 const TD_SYMBOL = {
@@ -406,7 +403,6 @@ function writeTradeCsv(entry) {
     row = [date, time, "Pepperstone", entry.symbol, cls, entry.side?.toUpperCase() || "BUY", qty, entry.price?.toFixed(5) || "", entry.tradeSize.toFixed(2), fee, entry.orderId || "", entry.paperTrading ? "PAPER" : "LIVE", "OPEN", "", "", "", "", `"All conditions met"`].join(",");
   }
   appendFileSync(CSV_FILE, row + "\n");
-  appendSheetRow(row.split(","), entry.symbol).catch(() => {});
 }
 
 function writeCloseCsv(closed) {
@@ -424,153 +420,7 @@ function writeCloseCsv(closed) {
     `"${closed.result === "WIN" ? "Take profit hit" : "Stop loss hit"}"`,
   ].join(",");
   appendFileSync(CSV_FILE, row + "\n");
-  appendSheetRow(row.split(","), closed.symbol).catch(() => {});
   console.log(`  ${closed.result === "WIN" ? "✅ WIN" : "❌ LOSS"} ${closed.symbol} | P&L: $${closed.pnlUSD.toFixed(4)} (${closed.pnlPct.toFixed(2)}%)`);
-}
-
-// ─── Google Sheets — 3-Tab Setup (Gold / Tech Stocks / Forex) ────────────────
-
-const TABS = {
-  commodity: { name: "Gold",        color: { red: 1.00, green: 0.84, blue: 0.00 } },
-  stock:     { name: "Tech Stocks", color: { red: 0.20, green: 0.40, blue: 0.80 } },
-  forex:     { name: "Forex",       color: { red: 0.20, green: 0.70, blue: 0.30 } },
-};
-
-const ROW_COLORS = {
-  BLOCKED: { red: 0.835, green: 0.000, blue: 0.000 },
-  OPEN:    { red: 0.000, green: 0.784, blue: 0.325 },
-  WIN:     { red: 1.000, green: 0.839, blue: 0.000 },
-  LOSS:    { red: 1.000, green: 0.427, blue: 0.000 },
-};
-
-const HEADER_COLOR  = { red: 0.082, green: 0.396, blue: 0.753 };
-const BORDER_STYLE  = { style: "SOLID", color: { red: 0.6, green: 0.6, blue: 0.6 } };
-const COL_COUNT     = 18;
-
-const sheetIdCache  = {};   // tab name → numeric sheetId
-let   sheetsClient  = null; // reuse across calls in same run
-
-async function getSheetsClient() {
-  if (sheetsClient) return sheetsClient;
-  let credentials;
-  if (process.env.GOOGLE_CREDENTIALS_B64) {
-    credentials = JSON.parse(Buffer.from(process.env.GOOGLE_CREDENTIALS_B64, "base64").toString("utf8"));
-  } else if (process.env.GOOGLE_CREDENTIALS_PATH && existsSync(process.env.GOOGLE_CREDENTIALS_PATH)) {
-    credentials = JSON.parse(readFileSync(process.env.GOOGLE_CREDENTIALS_PATH, "utf8"));
-  } else return null;
-  const auth = new google.auth.GoogleAuth({ credentials, scopes: ["https://www.googleapis.com/auth/spreadsheets"] });
-  sheetsClient = google.sheets({ version: "v4", auth: await auth.getClient() });
-  return sheetsClient;
-}
-
-async function getSheetId(sheets, tabName) {
-  if (sheetIdCache[tabName] !== undefined) return sheetIdCache[tabName];
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
-  for (const s of meta.data.sheets) sheetIdCache[s.properties.title] = s.properties.sheetId;
-  return sheetIdCache[tabName] ?? null;
-}
-
-async function ensureTab(sheets, tabName, tabColor) {
-  const sid = await getSheetId(sheets, tabName);
-  if (sid !== null) return sid;
-
-  // Create the tab
-  const res = await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: SHEET_ID,
-    requestBody: { requests: [{ addSheet: { properties: { title: tabName, tabColor } } }] },
-  });
-  const newId = res.data.replies[0].addSheet.properties.sheetId;
-  sheetIdCache[tabName] = newId;
-
-  const headers = CSV_HEADERS.split(",");
-
-  // Write header row
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SHEET_ID, range: `${tabName}!A1`,
-    valueInputOption: "RAW", requestBody: { values: [headers] },
-  });
-
-  // Format header + freeze + borders on A:R up to row 1000
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: SHEET_ID,
-    requestBody: { requests: [
-      // Bold blue header
-      { repeatCell: {
-        range: { sheetId: newId, startRowIndex: 0, endRowIndex: 1 },
-        cell: { userEnteredFormat: {
-          backgroundColor: HEADER_COLOR,
-          textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 }, fontSize: 11 },
-          horizontalAlignment: "CENTER", verticalAlignment: "MIDDLE",
-        }},
-        fields: "userEnteredFormat(backgroundColor,textFormat,horizontalAlignment,verticalAlignment)",
-      }},
-      // Freeze header
-      { updateSheetProperties: {
-        properties: { sheetId: newId, gridProperties: { frozenRowCount: 1 } },
-        fields: "gridProperties.frozenRowCount",
-      }},
-      // Borders on entire data area
-      { updateBorders: {
-        range: { sheetId: newId, startRowIndex: 0, endRowIndex: 1000, startColumnIndex: 0, endColumnIndex: COL_COUNT },
-        top: BORDER_STYLE, bottom: BORDER_STYLE, left: BORDER_STYLE, right: BORDER_STYLE,
-        innerHorizontal: BORDER_STYLE, innerVertical: BORDER_STYLE,
-      }},
-      // Auto-resize columns
-      { autoResizeDimensions: {
-        dimensions: { sheetId: newId, dimension: "COLUMNS", startIndex: 0, endIndex: COL_COUNT },
-      }},
-    ]},
-  });
-
-  return newId;
-}
-
-async function formatDataRow(sheets, sheetId, rowIndex, status) {
-  const color    = ROW_COLORS[status.toUpperCase()] || null;
-  if (!color) return;
-  const textWhite = status.toUpperCase() === "BLOCKED";
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: SHEET_ID,
-    requestBody: { requests: [{ repeatCell: {
-      range: { sheetId, startRowIndex: rowIndex, endRowIndex: rowIndex + 1, startColumnIndex: 0, endColumnIndex: COL_COUNT },
-      cell: { userEnteredFormat: {
-        backgroundColor: color,
-        textFormat: { foregroundColor: textWhite ? { red: 1, green: 1, blue: 1 } : { red: 0, green: 0, blue: 0 } },
-        verticalAlignment: "MIDDLE",
-      }},
-      fields: "userEnteredFormat(backgroundColor,textFormat,verticalAlignment)",
-    }}]},
-  });
-}
-
-async function appendSheetRow(row, symbol) {
-  if (!SHEET_ID) return;
-  try {
-    const sheets  = await getSheetsClient();
-    if (!sheets) return;
-
-    const cls     = assetClass(symbol || "");
-    const tab     = TABS[cls] || TABS.forex;
-    const sheetId = await ensureTab(sheets, tab.name, tab.color);
-
-    // Count existing rows to know the index of the new row
-    const countRes = await sheets.spreadsheets.values.get({ spreadsheetId: SHEET_ID, range: `${tab.name}!A:A` });
-    const rowIndex = countRes.data.values?.length ?? 1;
-
-    // Append data
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SHEET_ID, range: `${tab.name}!A:R`,
-      valueInputOption: "RAW", insertDataOption: "INSERT_ROWS",
-      requestBody: { values: [row.map(v => String(v).replace(/^"|"$/g, ""))] },
-    });
-
-    // Colour-code the row by Status (column index 12)
-    const status = String(row[12] || "").replace(/^"|"$/g, "").trim();
-    await formatDataRow(sheets, sheetId, rowIndex, status);
-
-  } catch (err) {
-    console.log(`  ⚠️  Sheets sync failed: ${err.message}`);
-  }
 }
 
 // ─── Per-Symbol Run ───────────────────────────────────────────────────────────
