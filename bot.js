@@ -402,10 +402,11 @@ function runStockORBCheck(symbol, candles, trendBias) {
 function loadPositions() { return existsSync(POSITIONS_FILE) ? JSON.parse(readFileSync(POSITIONS_FILE, "utf8")) : []; }
 function savePositions(p) { writeFileSync(POSITIONS_FILE, JSON.stringify(p, null, 2)); }
 
-function addPosition(symbol, side, price, qty, orderId, paper, extras = {}) {
+// Calculates SL and TP before order placement so they can be sent to the broker.
+function calcSLTP(symbol, side, price, extras = {}) {
   const { fvg, atr, orb } = extras;
   const cls = assetClass(symbol);
-  let sl, tp, risk;
+  let sl, risk;
 
   if (cls === "commodity" && fvg) {
     const buf = atr ? atr * 0.3 : 2.0;
@@ -417,11 +418,10 @@ function addPosition(symbol, side, price, qty, orderId, paper, extras = {}) {
       sl   = side === "buy" ? fvg.bottom - buf : fvg.top + buf;
       risk = Math.abs(price - sl);
     } else {
-      risk = atr ? atr * 0.8 : price * 0.002;  // ATR×0.8 — tight scalp SL
+      risk = atr ? atr * 0.8 : price * 0.002;
       sl   = side === "buy" ? price - risk : price + risk;
     }
   } else {
-    // Stocks: ORB-anchored SL if available, else ATR×1.0
     if (orb) {
       const buf = atr ? atr * 0.2 : price * 0.003;
       sl   = side === "buy" ? orb.low - buf : orb.high + buf;
@@ -432,8 +432,11 @@ function addPosition(symbol, side, price, qty, orderId, paper, extras = {}) {
     }
   }
 
-  tp = side === "buy" ? price + risk * 2 : price - risk * 2;  // 2:1 RR on all
+  const tp = side === "buy" ? price + risk * 2 : price - risk * 2;  // 2:1 RR
+  return { sl, tp };
+}
 
+function addPosition(symbol, side, price, qty, orderId, paper, sl, tp) {
   const pos = loadPositions();
   pos.push({ symbol, side, entryPrice: price, quantity: qty, orderId, sl, tp, slMoved: false, paperTrading: paper, openedAt: new Date().toISOString() });
   savePositions(pos);
@@ -574,19 +577,23 @@ async function runSymbol(symbol, log) {
     console.log(`  🚫 BLOCKED — ${results.filter(r => !r.pass).map(r => r.label).join("; ")}`);
   } else {
     const qty = tradeSize / price;
+    const { sl, tp } = calcSLTP(symbol, side, price, { fvg, atr, orb });
+    console.log(`  SL: ${sl.toFixed(5)} | TP: ${tp.toFixed(5)}`);
+
     if (CONFIG.paperTrading) {
-      console.log(`  📋 PAPER — ${side.toUpperCase()} ${symbol} ~$${tradeSize.toFixed(2)} | SL: ATR×${cls === "forex" ? "0.8" : "1.0"} | TP: 2:1`);
+      console.log(`  📋 PAPER — ${side.toUpperCase()} ${symbol} ~$${tradeSize.toFixed(2)}`);
       entry.orderPlaced = true;
       entry.orderId     = `PAPER-${Date.now()}`;
-      addPosition(symbol, side, price, qty, entry.orderId, true, { fvg, atr, orb });
+      addPosition(symbol, side, price, qty, entry.orderId, true, sl, tp);
     } else if (isConfigured()) {
       console.log(`  🔴 LIVE — ${side.toUpperCase()} ${symbol} ~$${tradeSize.toFixed(2)}`);
       try {
-        const order = await placeMarketOrder(symbol, side, tradeSize, price);
+        // SL and TP sent to broker — positions protected even if bot restarts
+        const order = await placeMarketOrder(symbol, side, tradeSize, price, sl, tp);
         entry.orderPlaced = true;
         entry.orderId     = order.orderId;
-        addPosition(symbol, side, price, qty, order.orderId, false, { fvg, atr, orb });
-        console.log(`  ✅ Order ID: ${order.orderId}`);
+        addPosition(symbol, side, price, qty, order.orderId, false, sl, tp);
+        console.log(`  ✅ Order ID: ${order.orderId} | SL/TP set on broker`);
       } catch (err) {
         console.log(`  ❌ Order failed: ${err.message}`);
         entry.error = err.message;

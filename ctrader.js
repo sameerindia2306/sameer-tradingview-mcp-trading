@@ -105,17 +105,20 @@ export function calcVolume(symbol, sizeUSD, price) {
 
 // ─── Order Placement ─────────────────────────────────────────────────────────
 
-export async function placeMarketOrder(symbol, side, sizeUSD, price) {
+export async function placeMarketOrder(symbol, side, sizeUSD, price, sl = null, tp = null) {
   const volume = calcVolume(symbol, sizeUSD, price);
 
   const body = {
     symbolName: symbol,
     orderType:  "MARKET",
-    tradeSide:  side.toUpperCase(),  // "BUY" or "SELL"
+    tradeSide:  side.toUpperCase(),
     volume,
+    // SL and TP sent to broker so positions are protected even if the bot restarts
+    ...(sl !== null && { stopLoss:   parseFloat(sl.toFixed(5)) }),
+    ...(tp !== null && { takeProfit: parseFloat(tp.toFixed(5)) }),
   };
 
-  console.log(`  → cTrader order: ${side.toUpperCase()} ${symbol} vol=${volume} (~$${sizeUSD})`);
+  console.log(`  → cTrader: ${side.toUpperCase()} ${symbol} vol=${volume} SL=${sl?.toFixed(5) ?? "none"} TP=${tp?.toFixed(5) ?? "none"}`);
   const result = await ctraderRequest("POST", `/tradingaccounts/${ACCOUNT_ID}/marketorders`, body);
   return { orderId: result.orderId || result.id || "ctrader-order" };
 }
