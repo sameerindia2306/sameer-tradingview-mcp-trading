@@ -3,23 +3,25 @@
  * Data:      Twelve Data API (free tier ~530 credits/day with bias cache)
  * Execution: cTrader Open API (Pepperstone)
  *
- * Forex pairs (best spread/volatility ratio for scalping):
- *   EURUSD · GBPUSD · USDJPY · GBPJPY
- *   Sessions: London 07:00–09:30 UTC · NY 13:30–15:30 UTC
- *   Strategy: 15m EMA(50) bias → 5m EMA(8/21) cross → RSI(14) → FVG bonus
- *   SL: ATR×0.8 · TP: 2:1 RR
+ * Tiered confidence sizing — more signals, more profits:
+ *   STRONG  (all critical + 2+ bonus pass) → 1.5× size
+ *   FULL    (all critical + 1 bonus pass)  → 1× size
+ *   HALF    (all critical, 0 bonus)        → 0.5× size
+ *   BLOCK   (any critical fails)           → no trade
  *
- * Gold (XAUUSD):
- *   ICT Silver Bullet enhanced — FVG entry + displacement candle confirmation
- *   SL: beyond FVG edge · TP: 2:1 RR
+ * Forex:  EURUSD · GBPUSD · USDJPY · GBPJPY
+ *   Critical: session active + EMA(8/21) direction
+ *   Scored:   RSI(14) zone (widened) · 15m bias · FVG aligned
  *
- * Tech stocks (NYSE):
- *   Opening Range Breakout (ORB) — first 15-min high/low
- *   Entry: breakout + VWAP alignment + RSI(14)
- *   Session: 13:45–15:30 UTC (after opening range is set)
- *   SL: ATR×1.0 · TP: 2:1 RR
+ * Gold (XAUUSD): ICT Silver Bullet
+ *   Critical: Silver Bullet window + FVG detected + price in FVG
+ *   Scored:   15m/5m EMA alignment · displacement candle
  *
- * Risk: max 6 trades/day · −2% daily loss limit · safe-moderate sizing
+ * Stocks (NYSE ORB):
+ *   Critical: session active + ORB breakout + VWAP aligned
+ *   Scored:   RSI(14) zone (widened) · 15m bias
+ *
+ * Risk: max 6 trades/day · −2% daily loss limit · SL/TP sent to broker
  */
 
 import "dotenv/config";
@@ -44,7 +46,6 @@ const CONFIG = {
   tdApiKey:          process.env.TWELVE_DATA_API_KEY || "",
 };
 
-// Best 4 forex pairs for scalping on Pepperstone ECN
 const FOREX_SCALP_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "GBPJPY"];
 
 const CSV_FILE       = process.env.TRADE_LOG_PATH || "C:/Users/spathan/Desktop/sameer-trades.csv";
@@ -59,7 +60,6 @@ const TD_SYMBOL = {
   XAUUSD: "XAU/USD",
 };
 
-// High-volume NYSE stocks — best for ORB intraday scalping
 const STOCK_POOL = [
   "AAPL","TSLA","NVDA","MSFT","GOOGL","AMZN","META",
   "AMD","NFLX","QCOM","AVGO","CRM","DDOG",
@@ -71,6 +71,21 @@ function assetClass(symbol) {
   if (symbol.includes("XAU") || symbol.includes("XAG")) return "commodity";
   if (FOREX_SET.has(symbol)) return "forex";
   return "stock";
+}
+
+// ─── Confidence → trade size ──────────────────────────────────────────────────
+
+// score = number of bonus conditions that passed
+function tradeSize(score) {
+  if (score >= 2) return CONFIG.maxTradeSizeUSD * 1.5;  // STRONG
+  if (score === 1) return CONFIG.maxTradeSizeUSD;         // FULL
+  return CONFIG.maxTradeSizeUSD * 0.5;                    // HALF
+}
+
+function confidenceLabel(score) {
+  if (score >= 2) return "💪 STRONG";
+  if (score === 1) return "✅ FULL";
+  return "〰️  HALF";
 }
 
 // ─── Market Data ──────────────────────────────────────────────────────────────
@@ -134,12 +149,11 @@ function calcATR(candles, period = 14) {
 
 // ─── 15m Trend Bias — cached per symbol, refreshed every 15 min ──────────────
 
-const biasCache = {}; // { symbol: { bias, expiresAt } }
+const biasCache = {};
 
 async function getTrendBias(symbol) {
   const now = Date.now();
   if (biasCache[symbol]?.expiresAt > now) return biasCache[symbol].bias;
-
   try {
     const candles = await fetchCandles(symbol, 60, "15m");
     const closes  = candles.map(c => c.close);
@@ -163,7 +177,7 @@ function getUTCHour() {
 function isActiveSession(cls) {
   const h = getUTCHour();
   if (cls === "forex")     return (h >= 7.0 && h < 9.5) || (h >= 13.5 && h < 15.5);
-  if (cls === "stock")     return h >= 13.75 && h < 15.5;  // 13:45–15:30 UTC (after ORB set)
+  if (cls === "stock")     return h >= 13.75 && h < 15.5;
   if (cls === "commodity") return isInSilverBulletWindow();
   return false;
 }
@@ -179,10 +193,9 @@ function isWatchlistStale() {
 async function scoreStock(symbol) {
   try {
     const candles = await fetchCandles(symbol, 50, "5m");
-    const closes  = candles.map(c => c.close);
     const atr     = calcATR(candles, 14) || 0;
-    // Score = ATR% — higher daily range relative to price = better scalp target
-    return (atr / closes[closes.length - 1]) * 100;
+    const price   = candles[candles.length - 1].close;
+    return (atr / price) * 100;
   } catch { return 0; }
 }
 
@@ -190,7 +203,7 @@ async function refreshWatchlist() {
   const isSunday = new Date().getUTCDay() === 0;
   if (!isSunday && !isWatchlistStale()) return;
 
-  console.log("[Watchlist] Sunday scan — scoring stocks by ATR% (scalp suitability)...");
+  console.log("[Watchlist] Sunday scan — scoring stocks by ATR%...");
   const scores = [];
   for (const sym of STOCK_POOL) {
     const score = await scoreStock(sym);
@@ -198,8 +211,6 @@ async function refreshWatchlist() {
     scores.push({ sym, score });
     await new Promise(r => setTimeout(r, 8000));
   }
-
-  // Top 8 stocks by ATR% — best intraday range for ORB scalping
   const top8  = scores.sort((a, b) => b.score - a.score).slice(0, 8).map(s => s.sym);
   const pairs = ["XAUUSD", ...FOREX_SCALP_PAIRS, ...top8];
   writeFileSync(WATCHLIST_FILE, JSON.stringify({ pairs, updatedAt: new Date().toISOString() }, null, 2));
@@ -214,7 +225,7 @@ function getActiveSymbols() {
   return ["XAUUSD", ...FOREX_SCALP_PAIRS, "AAPL", "TSLA", "NVDA", "MSFT", "GOOGL", "AMZN", "META", "AMD"];
 }
 
-// ─── ICT Silver Bullet — XAUUSD ───────────────────────────────────────────────
+// ─── ICT Silver Bullet helpers ────────────────────────────────────────────────
 
 function getNYHour() {
   const now = new Date();
@@ -229,69 +240,68 @@ function isDST(date) {
 }
 
 function isInSilverBulletWindow() {
-  const nyH = getNYHour();
-  const utcH = getUTCHour();
-  return (utcH >= 8 && utcH < 10)  ||  // London open
-         (nyH  >= 3 && nyH  < 4)   ||  // 3–4 AM NY
-         (nyH  >= 10 && nyH  < 11) ||  // 10–11 AM NY
-         (nyH  >= 14 && nyH  < 15);    // 2–3 PM NY
+  const nyH = getNYHour(); const utcH = getUTCHour();
+  return (utcH >= 8 && utcH < 10) || (nyH >= 3 && nyH < 4) ||
+         (nyH >= 10 && nyH < 11)  || (nyH >= 14 && nyH < 15);
 }
 
 function detectFVG(candles) {
   for (let i = candles.length - 1; i >= 2; i--) {
     const [a, , c] = [candles[i - 2], candles[i - 1], candles[i]];
-    if (c.low  > a.high) return { type: "bullish", top: c.low,  bottom: a.high, mid: (c.low + a.high) / 2 };
-    if (c.high < a.low)  return { type: "bearish", top: a.low,  bottom: c.high, mid: (a.low + c.high) / 2 };
+    if (c.low  > a.high) return { type: "bullish", top: c.low,  bottom: a.high };
+    if (c.high < a.low)  return { type: "bearish", top: a.low,  bottom: c.high };
   }
   return null;
 }
 
-function isDisplacementCandle(candles, atr) {
-  if (!atr || candles.length < 2) return false;
-  const last = candles[candles.length - 1];
-  return (last.high - last.low) >= atr * 1.2; // candle body > 1.2× ATR = strong displacement
-}
+// ─── Strategy: ICT Silver Bullet (XAUUSD) ────────────────────────────────────
+// Critical (ALL must pass or block): window + FVG exists + price in FVG
+// Scored (each +1 to confidence):    15m/5m EMA alignment · displacement candle
 
 function runSilverBulletCheck(candles, trendBias) {
-  const results = [];
-  const check   = (label, pass) => { results.push({ label, pass }); console.log(`  ${pass ? "✅" : "🚫"} ${label}`); };
+  const critical = [], scored = [];
+  const crit  = (label, pass) => { critical.push({ label, pass }); console.log(`  ${pass ? "✅" : "🚫"} [C] ${label}`); };
+  const bonus = (label, pass) => { scored.push({ label, pass });   console.log(`  ${pass ? "✅" : "⚪"} [B] ${label}`); };
 
-  const price   = candles[candles.length - 1].close;
-  const nyH     = getNYHour().toFixed(2);
-  const atr     = calcATR(candles, 14);
-  const closes  = candles.map(c => c.close);
-  const ema8    = calcEMA(closes, 8);
-  const ema21   = calcEMA(closes, 21);
+  const closes = candles.map(c => c.close);
+  const price  = closes[closes.length - 1];
+  const atr    = calcATR(candles, 14);
+  const ema8   = calcEMA(closes, 8);
+  const ema21  = calcEMA(closes, 21);
+  const nyH    = getNYHour().toFixed(2);
 
-  check(`Silver Bullet window (London 08–10 UTC / 3–4 AM / 10–11 AM / 2–3 PM NY) — now ${nyH} NY`, isInSilverBulletWindow());
-
-  if (trendBias) {
-    check(`15m trend bias ${trendBias.toUpperCase()} aligned with 5m EMA(8/21)`,
-      (trendBias === "bullish" && ema8 > ema21) || (trendBias === "bearish" && ema8 < ema21));
-  }
+  crit(`Silver Bullet window (now ${nyH} NY)`, isInSilverBulletWindow());
 
   const fvg = detectFVG(candles.slice(-15));
-  check("Fair Value Gap detected in last 15 candles", !!fvg);
-  if (!fvg) return { results, allPass: false, side: null, fvg: null };
+  crit("FVG detected in last 15 candles", !!fvg);
+  if (!fvg) return { criticalPass: false, score: 0, side: null, fvg: null, results: [...critical, ...scored] };
 
   const inFVG = price >= fvg.bottom && price <= fvg.top;
-  check(`Price retracing into FVG (${fvg.bottom.toFixed(2)}–${fvg.top.toFixed(2)})`, inFVG);
-
-  const displacement = isDisplacementCandle(candles.slice(-3), atr);
-  check("Displacement candle confirms move (body ≥ 1.2× ATR)", displacement);
-
+  crit(`Price retracing into FVG (${fvg.bottom.toFixed(2)}–${fvg.top.toFixed(2)})`, inFVG);
   console.log(`  ℹ️  FVG: ${fvg.type.toUpperCase()} | ATR: ${atr ? atr.toFixed(2) : "N/A"}`);
 
-  const allPass = results.every(r => r.pass);
-  const side    = fvg.type === "bullish" ? "buy" : "sell";
-  return { results, allPass, side, fvg };
+  // Bonus conditions
+  if (trendBias) {
+    const emaAligned = (trendBias === "bullish" && ema8 > ema21) || (trendBias === "bearish" && ema8 < ema21);
+    bonus(`15m bias ${trendBias.toUpperCase()} + 5m EMA(8/21) aligned`, emaAligned);
+  }
+  const bigCandle = atr ? (candles[candles.length - 1].high - candles[candles.length - 1].low) >= atr * 1.2 : false;
+  bonus("Displacement candle (body ≥ 1.2× ATR)", bigCandle);
+
+  const criticalPass = critical.every(r => r.pass);
+  const score        = scored.filter(r => r.pass).length;
+  const side         = fvg.type === "bullish" ? "buy" : "sell";
+  return { criticalPass, score, side, fvg, results: [...critical, ...scored] };
 }
 
-// ─── Forex Scalp — EMA(8/21) + RSI + 15m Bias + FVG bonus ───────────────────
+// ─── Strategy: Forex Scalp — EMA(8/21) + RSI + bias + FVG ───────────────────
+// Critical: session active + EMA(8/21) direction
+// Scored:   RSI in zone (widened) · 15m bias · FVG aligned
 
 function runForexScalpCheck(symbol, candles, trendBias) {
-  const results = [];
-  const check   = (label, pass) => { results.push({ label, pass }); console.log(`  ${pass ? "✅" : "🚫"} ${label}`); };
+  const critical = [], scored = [];
+  const crit  = (label, pass) => { critical.push({ label, pass }); console.log(`  ${pass ? "✅" : "🚫"} [C] ${label}`); };
+  const bonus = (label, pass) => { scored.push({ label, pass });   console.log(`  ${pass ? "✅" : "⚪"} [B] ${label}`); };
 
   const closes = candles.map(c => c.close);
   const price  = closes[closes.length - 1];
@@ -299,65 +309,58 @@ function runForexScalpCheck(symbol, candles, trendBias) {
   const ema21  = calcEMA(closes, 21);
   const rsi14  = calcRSI(closes, 14);
   const h      = getUTCHour();
-
-  const inLondon = h >= 7.0 && h < 9.5;
-  const inNY     = h >= 13.5 && h < 15.5;
+  const inSession = (h >= 7.0 && h < 9.5) || (h >= 13.5 && h < 15.5);
 
   console.log(`  EMA(8): ${ema8.toFixed(5)} | EMA(21): ${ema21.toFixed(5)} | RSI: ${rsi14 ? rsi14.toFixed(1) : "N/A"}`);
 
-  check(`Session active (London 07–09:30 / NY 13:30–15:30 UTC)`, inLondon || inNY);
-
   const bullishEMA = ema8 > ema21;
   const bearishEMA = ema8 < ema21;
+  const goLong     = bullishEMA && trendBias !== "bearish";
+  const goShort    = bearishEMA && trendBias !== "bullish";
+
+  crit("Session active (London 07–09:30 / NY 13:30–15:30 UTC)", inSession);
+  crit("EMA(8/21) direction established", bullishEMA || bearishEMA);
+
+  // Scored — widened RSI, 15m bias, FVG
+  if (goLong || bullishEMA) {
+    bonus("RSI(14) bullish zone (45–75)", rsi14 !== null && rsi14 >= 45 && rsi14 <= 75);
+  } else {
+    bonus("RSI(14) bearish zone (25–55)", rsi14 !== null && rsi14 >= 25 && rsi14 <= 55);
+  }
 
   if (trendBias) {
-    check(`15m bias ${trendBias.toUpperCase()} aligned with 5m EMA cross`,
+    bonus(`15m bias ${trendBias.toUpperCase()} aligns with EMA direction`,
       (trendBias === "bullish" && bullishEMA) || (trendBias === "bearish" && bearishEMA));
   }
 
-  const goLong  = bullishEMA && trendBias !== "bearish";
-  const goShort = bearishEMA && trendBias !== "bullish";
-
-  if (goLong) {
-    check("EMA(8) above EMA(21) — 5m uptrend confirmed", true);
-    check("RSI(14) in bullish momentum zone (50–72)", rsi14 !== null && rsi14 >= 50 && rsi14 <= 72);
-  } else if (goShort) {
-    check("EMA(8) below EMA(21) — 5m downtrend confirmed", true);
-    check("RSI(14) in bearish momentum zone (28–50)", rsi14 !== null && rsi14 >= 28 && rsi14 <= 50);
-  } else {
-    check("EMA(8/21) + 15m bias alignment required", false);
-  }
-
-  // FVG: bonus — aligned FVG allows tighter SL, does not block trade
   const fvg        = detectFVG(candles.slice(-15));
   const fvgAligned = fvg && ((goLong && fvg.type === "bullish") || (goShort && fvg.type === "bearish"));
-  if (fvg) console.log(`  ℹ️  FVG ${fvg.type} — ${fvgAligned ? "✅ aligned (tighter SL)" : "⚪ not aligned"}`);
+  if (fvg) console.log(`  ℹ️  FVG ${fvg.type} — ${fvgAligned ? "aligned ✅" : "not aligned ⚪"}`);
+  bonus("FVG aligned with trade direction", !!fvgAligned);
 
-  const allPass = results.every(r => r.pass);
-  const side    = goLong ? "buy" : goShort ? "sell" : null;
-  return { results, allPass, side, fvg: fvgAligned ? fvg : null };
+  const criticalPass = critical.every(r => r.pass);
+  const score        = scored.filter(r => r.pass).length;
+  const side         = goLong ? "buy" : goShort ? "sell" : (bullishEMA ? "buy" : "sell");
+  return { criticalPass, score, side, fvg: fvgAligned ? fvg : null, results: [...critical, ...scored] };
 }
 
-// ─── NYSE ORB Scalp — Opening Range Breakout + VWAP + RSI ────────────────────
+// ─── Strategy: NYSE Opening Range Breakout ────────────────────────────────────
+// Critical: session active + ORB breakout + VWAP aligned
+// Scored:   RSI in zone (widened) · 15m bias
 
 function getOpeningRange(candles) {
-  // NYSE open = 13:30 UTC. Opening range = candles from 13:30–13:45 UTC
-  const orbStart = 13.5;   // 13:30
-  const orbEnd   = 13.75;  // 13:45
   const orbCandles = candles.filter(c => {
     const h = new Date(c.time).getUTCHours() + new Date(c.time).getUTCMinutes() / 60;
-    return h >= orbStart && h < orbEnd;
+    return h >= 13.5 && h < 13.75;
   });
   if (orbCandles.length < 2) return null;
-  return {
-    high: Math.max(...orbCandles.map(c => c.high)),
-    low:  Math.min(...orbCandles.map(c => c.low)),
-  };
+  return { high: Math.max(...orbCandles.map(c => c.high)), low: Math.min(...orbCandles.map(c => c.low)) };
 }
 
 function runStockORBCheck(symbol, candles, trendBias) {
-  const results = [];
-  const check   = (label, pass) => { results.push({ label, pass }); console.log(`  ${pass ? "✅" : "🚫"} ${label}`); };
+  const critical = [], scored = [];
+  const crit  = (label, pass) => { critical.push({ label, pass }); console.log(`  ${pass ? "✅" : "🚫"} [C] ${label}`); };
+  const bonus = (label, pass) => { scored.push({ label, pass });   console.log(`  ${pass ? "✅" : "⚪"} [B] ${label}`); };
 
   const closes  = candles.map(c => c.close);
   const price   = closes[closes.length - 1];
@@ -367,42 +370,41 @@ function runStockORBCheck(symbol, candles, trendBias) {
 
   console.log(`  Price: ${price.toFixed(3)} | VWAP: ${vwap ? vwap.toFixed(3) : "N/A"} | RSI: ${rsi14 ? rsi14.toFixed(1) : "N/A"}`);
 
-  check("NYSE scalp session (13:45–15:30 UTC)", h >= 13.75 && h < 15.5);
+  crit("NYSE scalp session (13:45–15:30 UTC)", h >= 13.75 && h < 15.5);
 
   const orb = getOpeningRange(candles);
   if (!orb) {
-    check("Opening range established (13:30–13:45 candles available)", false);
-    return { results, allPass: false, side: null };
+    crit("Opening range established (13:30–13:45 candles present)", false);
+    return { criticalPass: false, score: 0, side: null, orb: null, results: [...critical, ...scored] };
   }
 
   console.log(`  ORB: ${orb.low.toFixed(3)}–${orb.high.toFixed(3)}`);
-
   const aboveORB = price > orb.high;
   const belowORB = price < orb.low;
 
-  check(`ORB breakout (above ${orb.high.toFixed(3)} or below ${orb.low.toFixed(3)})`, aboveORB || belowORB);
+  crit(`ORB breakout (above ${orb.high.toFixed(3)} or below ${orb.low.toFixed(3)})`, aboveORB || belowORB);
+  crit("VWAP confirms direction", vwap ? (aboveORB ? price > vwap : price < vwap) : false);
 
+  // Scored — widened RSI, 15m bias
   if (aboveORB) {
-    check("VWAP supports long (price above VWAP)", vwap ? price > vwap : false);
-    check("RSI(14) bullish momentum (52–75)", rsi14 !== null && rsi14 >= 52 && rsi14 <= 75);
-    if (trendBias) check(`15m bias ${trendBias.toUpperCase()} supports long`, trendBias === "bullish");
-  } else if (belowORB) {
-    check("VWAP supports short (price below VWAP)", vwap ? price < vwap : false);
-    check("RSI(14) bearish momentum (25–48)", rsi14 !== null && rsi14 >= 25 && rsi14 <= 48);
-    if (trendBias) check(`15m bias ${trendBias.toUpperCase()} supports short`, trendBias === "bearish");
+    bonus("RSI(14) bullish momentum (48–78)", rsi14 !== null && rsi14 >= 48 && rsi14 <= 78);
+  } else {
+    bonus("RSI(14) bearish momentum (22–52)", rsi14 !== null && rsi14 >= 22 && rsi14 <= 52);
   }
 
-  const allPass = results.every(r => r.pass);
-  const side    = aboveORB ? "buy" : belowORB ? "sell" : null;
-  return { results, allPass, side, orb };
+  if (trendBias) {
+    bonus(`15m bias ${trendBias.toUpperCase()} supports breakout direction`,
+      (aboveORB && trendBias === "bullish") || (belowORB && trendBias === "bearish"));
+  }
+
+  const criticalPass = critical.every(r => r.pass);
+  const score        = scored.filter(r => r.pass).length;
+  const side         = aboveORB ? "buy" : "sell";
+  return { criticalPass, score, side, orb, results: [...critical, ...scored] };
 }
 
-// ─── Position Tracking ────────────────────────────────────────────────────────
+// ─── SL/TP calculation ────────────────────────────────────────────────────────
 
-function loadPositions() { return existsSync(POSITIONS_FILE) ? JSON.parse(readFileSync(POSITIONS_FILE, "utf8")) : []; }
-function savePositions(p) { writeFileSync(POSITIONS_FILE, JSON.stringify(p, null, 2)); }
-
-// Calculates SL and TP before order placement so they can be sent to the broker.
 function calcSLTP(symbol, side, price, extras = {}) {
   const { fvg, atr, orb } = extras;
   const cls = assetClass(symbol);
@@ -432,9 +434,14 @@ function calcSLTP(symbol, side, price, extras = {}) {
     }
   }
 
-  const tp = side === "buy" ? price + risk * 2 : price - risk * 2;  // 2:1 RR
+  const tp = side === "buy" ? price + risk * 2 : price - risk * 2;
   return { sl, tp };
 }
+
+// ─── Position Tracking ────────────────────────────────────────────────────────
+
+function loadPositions() { return existsSync(POSITIONS_FILE) ? JSON.parse(readFileSync(POSITIONS_FILE, "utf8")) : []; }
+function savePositions(p) { writeFileSync(POSITIONS_FILE, JSON.stringify(p, null, 2)); }
 
 function addPosition(symbol, side, price, qty, orderId, paper, sl, tp) {
   const pos = loadPositions();
@@ -483,7 +490,7 @@ function todayCount(log) {
   return log.trades.filter(t => t.timestamp?.startsWith(today) && t.orderPlaced).length;
 }
 
-const CSV_HEADERS = "Date,Time (UTC),Broker,Symbol,Asset Class,Side,Quantity,Entry Price,Total USD,Fee (est.),Order ID,Mode,Status,Exit Price,Exit Time,P&L USD,P&L %,Notes";
+const CSV_HEADERS = "Date,Time (UTC),Broker,Symbol,Asset Class,Side,Quantity,Entry Price,Total USD,Fee (est.),Order ID,Mode,Status,Confidence,Exit Price,Exit Time,P&L USD,P&L %,Notes";
 
 function initCsv() {
   if (!existsSync(CSV_FILE)) writeFileSync(CSV_FILE, CSV_HEADERS + "\n");
@@ -494,7 +501,7 @@ function getDailyPnL() {
   const today = new Date().toISOString().slice(0, 10);
   return readFileSync(CSV_FILE, "utf8").trim().split("\n").slice(1)
     .filter(l => l.startsWith(today))
-    .reduce((sum, l) => { const p = parseFloat(l.split(",")[15]); return sum + (isNaN(p) ? 0 : p); }, 0);
+    .reduce((sum, l) => { const p = parseFloat(l.split(",")[16]); return sum + (isNaN(p) ? 0 : p); }, 0);
 }
 
 function writeTradeCsv(entry) {
@@ -502,14 +509,15 @@ function writeTradeCsv(entry) {
   const date = now.toISOString().slice(0, 10);
   const time = now.toISOString().slice(11, 19);
   const cls  = assetClass(entry.symbol);
+  const conf = entry.confidence ?? "";
   let row;
-  if (!entry.allPass) {
-    const reasons = entry.conditions.filter(c => !c.pass).map(c => c.label).join("; ");
-    row = [date, time, "Pepperstone", entry.symbol, cls, "", "", entry.price?.toFixed(5) || "", "", "", "BLOCKED", "BLOCKED", "BLOCKED", "", "", "", "", `"Failed: ${reasons}"`].join(",");
+  if (!entry.criticalPass) {
+    const reasons = (entry.conditions ?? []).filter(c => !c.pass).map(c => c.label).join("; ");
+    row = [date, time, "Pepperstone", entry.symbol, cls, "", "", entry.price?.toFixed(5) || "", "", "", "", "BLOCKED", "BLOCKED", conf, "", "", "", "", `"Failed: ${reasons}"`].join(",");
   } else {
     const qty = (entry.tradeSize / entry.price).toFixed(6);
     const fee = (entry.tradeSize * 0.0007).toFixed(4);
-    row = [date, time, "Pepperstone", entry.symbol, cls, entry.side?.toUpperCase() || "", qty, entry.price?.toFixed(5) || "", entry.tradeSize.toFixed(2), fee, entry.orderId || "", entry.paperTrading ? "PAPER" : "LIVE", "OPEN", "", "", "", "", `"All conditions met"`].join(",");
+    row = [date, time, "Pepperstone", entry.symbol, cls, entry.side?.toUpperCase() || "", qty, entry.price?.toFixed(5) || "", entry.tradeSize.toFixed(2), fee, entry.orderId || "", entry.paperTrading ? "PAPER" : "LIVE", "OPEN", conf, "", "", "", "", `"${conf} signal"`].join(",");
   }
   appendFileSync(CSV_FILE, row + "\n");
 }
@@ -524,12 +532,13 @@ function writeCloseCsv(closed) {
     closed.entryPrice.toFixed(5), (closed.entryPrice * closed.quantity).toFixed(2),
     (closed.entryPrice * closed.quantity * 0.0007).toFixed(4),
     closed.orderId, closed.paperTrading ? "PAPER" : "LIVE", closed.result,
+    closed.confidence ?? "",
     closed.exitPrice.toFixed(5), x.toISOString().slice(0,19).replace("T"," "),
     closed.pnlUSD.toFixed(4), closed.pnlPct.toFixed(2) + "%",
     `"${closed.result === "WIN" ? "TP hit" : "SL hit"}"`,
   ].join(",");
   appendFileSync(CSV_FILE, row + "\n");
-  console.log(`  ${closed.result === "WIN" ? "✅ WIN" : "❌ LOSS"} ${closed.symbol} | P&L: $${closed.pnlUSD.toFixed(4)} (${closed.pnlPct.toFixed(2)}%)`);
+  console.log(`  ${closed.result === "WIN" ? "✅ WIN" : "❌ LOSS"} ${closed.symbol} | P&L: $${closed.pnlUSD.toFixed(4)} (${closed.pnlPct.toFixed(2)}%) | ${closed.confidence ?? ""}`);
 }
 
 // ─── Per-Symbol Run ───────────────────────────────────────────────────────────
@@ -556,40 +565,39 @@ async function runSymbol(symbol, log) {
 
   const trendBias = await getTrendBias(symbol);
 
-  let results, allPass, side, fvg = null, orb = null;
-  const tradeSize = Math.min(CONFIG.portfolioValue * 0.05, CONFIG.maxTradeSizeUSD);
+  let criticalPass, score, side, fvg = null, orb = null, results;
 
   if (symbol === "XAUUSD") {
-    ({ results, allPass, side, fvg } = runSilverBulletCheck(candles, trendBias));
+    ({ criticalPass, score, side, fvg, results } = runSilverBulletCheck(candles, trendBias));
   } else if (cls === "stock") {
-    ({ results, allPass, side, orb } = runStockORBCheck(symbol, candles, trendBias));
+    ({ criticalPass, score, side, orb, results } = runStockORBCheck(symbol, candles, trendBias));
   } else {
-    ({ results, allPass, side, fvg } = runForexScalpCheck(symbol, candles, trendBias));
+    ({ criticalPass, score, side, fvg, results } = runForexScalpCheck(symbol, candles, trendBias));
   }
 
+  const confidence = criticalPass ? confidenceLabel(score) : "BLOCKED";
+  const size       = criticalPass ? tradeSize(score) : 0;
+
   const entry = {
-    timestamp: new Date().toISOString(), symbol, price, side, tradeSize,
-    conditions: results, allPass, paperTrading: CONFIG.paperTrading,
-    orderPlaced: false, orderId: null,
+    timestamp: new Date().toISOString(), symbol, price, side, tradeSize: size,
+    conditions: results, criticalPass, score, confidence,
+    paperTrading: CONFIG.paperTrading, orderPlaced: false, orderId: null,
   };
 
-  if (!allPass) {
+  if (!criticalPass) {
     console.log(`  🚫 BLOCKED — ${results.filter(r => !r.pass).map(r => r.label).join("; ")}`);
   } else {
-    const qty = tradeSize / price;
     const { sl, tp } = calcSLTP(symbol, side, price, { fvg, atr, orb });
-    console.log(`  SL: ${sl.toFixed(5)} | TP: ${tp.toFixed(5)}`);
+    const qty = size / price;
+    console.log(`  ${confidence} — ${side.toUpperCase()} ${symbol} $${size.toFixed(2)} | SL: ${sl.toFixed(5)} | TP: ${tp.toFixed(5)}`);
 
     if (CONFIG.paperTrading) {
-      console.log(`  📋 PAPER — ${side.toUpperCase()} ${symbol} ~$${tradeSize.toFixed(2)}`);
       entry.orderPlaced = true;
       entry.orderId     = `PAPER-${Date.now()}`;
       addPosition(symbol, side, price, qty, entry.orderId, true, sl, tp);
     } else if (isConfigured()) {
-      console.log(`  🔴 LIVE — ${side.toUpperCase()} ${symbol} ~$${tradeSize.toFixed(2)}`);
       try {
-        // SL and TP sent to broker — positions protected even if bot restarts
-        const order = await placeMarketOrder(symbol, side, tradeSize, price, sl, tp);
+        const order = await placeMarketOrder(symbol, side, size, price, sl, tp);
         entry.orderPlaced = true;
         entry.orderId     = order.orderId;
         addPosition(symbol, side, price, qty, order.orderId, false, sl, tp);
@@ -627,6 +635,7 @@ async function run() {
   console.log(`  ${new Date().toISOString()}`);
   console.log(`  Mode: ${CONFIG.paperTrading ? "📋 PAPER" : "🔴 LIVE"} | cTrader: ${isConfigured() ? "✅ Ready" : "⏳ Awaiting KYC"}`);
   console.log(`  Symbols: ${symbols.join(", ")}`);
+  console.log(`  Sizing: HALF $${(CONFIG.maxTradeSizeUSD*0.5).toFixed(0)} | FULL $${CONFIG.maxTradeSizeUSD} | STRONG $${(CONFIG.maxTradeSizeUSD*1.5).toFixed(0)}`);
   console.log("═══════════════════════════════════════════════════════════");
 
   initCsv();
