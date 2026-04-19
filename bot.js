@@ -228,15 +228,14 @@ function getActiveSymbols() {
 // ─── ICT Silver Bullet helpers ────────────────────────────────────────────────
 
 function getNYHour() {
+  // Use Intl so DST is always correct regardless of server timezone (e.g. Railway UTC)
   const now = new Date();
-  const offset = isDST(now) ? -4 : -5;
-  return ((now.getUTCHours() + offset + 24) % 24) + now.getUTCMinutes() / 60;
-}
-
-function isDST(date) {
-  const jan = new Date(date.getFullYear(), 0, 1).getTimezoneOffset();
-  const jul = new Date(date.getFullYear(), 6, 1).getTimezoneOffset();
-  return date.getTimezoneOffset() < Math.max(jan, jul);
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York", hour: "numeric", minute: "numeric", hour12: false,
+  }).formatToParts(now);
+  const h = parseInt(parts.find(p => p.type === "hour").value, 10);
+  const m = parseInt(parts.find(p => p.type === "minute").value, 10);
+  return h + m / 60;
 }
 
 function isInSilverBulletWindow() {
@@ -619,6 +618,12 @@ async function runSymbol(symbol, log) {
 
 async function run() {
   if (!CONFIG.tdApiKey) { console.log("⚠️  TWELVE_DATA_API_KEY missing."); return; }
+
+  const utcDay = new Date().getUTCDay(); // 0 = Sunday, 6 = Saturday
+  if (utcDay === 0 || utcDay === 6) {
+    console.log(`[${new Date().toISOString()}] Weekend — markets closed, skipping cycle.`);
+    return;
+  }
 
   await refreshWatchlist();
   const symbols = getActiveSymbols();
