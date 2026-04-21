@@ -48,7 +48,7 @@ const CONFIG = {
 
 const FOREX_SCALP_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "GBPJPY"];
 
-const CSV_FILE       = process.env.TRADE_LOG_PATH || "C:/Users/spathan/Desktop/sameer-trades.csv";
+const CSV_FILE       = process.env.TRADE_LOG_PATH || "trades.csv";
 const POSITIONS_FILE = "open-positions.json";
 const LOG_FILE       = "safety-check-log.json";
 const WATCHLIST_FILE = "watchlist.json";
@@ -253,44 +253,58 @@ function detectFVG(candles) {
   return null;
 }
 
-// ─── Strategy: ICT Silver Bullet (XAUUSD) ────────────────────────────────────
-// Critical (ALL must pass or block): window + FVG exists + price in FVG
-// Scored (each +1 to confidence):    15m/5m EMA alignment · displacement candle
+// ─── Strategy: Gold (XAUUSD) — EMA trend during Silver Bullet windows ─────────
+// Critical: Silver Bullet window active + EMA(8/21) direction established
+// Scored:   15m bias aligned · RSI(7) zone · FVG in direction (bonus if present)
+//
+// Replaced pure FVG-retracement Silver Bullet — that strategy misses strong
+// trending moves (e.g. gold $3000→$3300 April 2026 breakout with no retraces).
 
-function runSilverBulletCheck(candles, trendBias) {
+function runGoldCheck(candles, trendBias) {
   const critical = [], scored = [];
   const crit  = (label, pass) => { critical.push({ label, pass }); console.log(`  ${pass ? "✅" : "🚫"} [C] ${label}`); };
   const bonus = (label, pass) => { scored.push({ label, pass });   console.log(`  ${pass ? "✅" : "⚪"} [B] ${label}`); };
 
-  const closes = candles.map(c => c.close);
-  const price  = closes[closes.length - 1];
-  const atr    = calcATR(candles, 14);
-  const ema8   = calcEMA(closes, 8);
-  const ema21  = calcEMA(closes, 21);
-  const nyH    = getNYHour().toFixed(2);
+  const closes    = candles.map(c => c.close);
+  const price     = closes[closes.length - 1];
+  const atr       = calcATR(candles, 14);
+  const ema8      = calcEMA(closes, 8);
+  const ema21     = calcEMA(closes, 21);
+  const rsi7      = calcRSI(closes, 7);
+  const bullishEMA = ema8 > ema21;
+  const nyH       = getNYHour().toFixed(2);
+
+  console.log(`  EMA(8): ${ema8.toFixed(2)} | EMA(21): ${ema21.toFixed(2)} | RSI(7): ${rsi7 ? rsi7.toFixed(1) : "N/A"} | ATR: ${atr ? atr.toFixed(2) : "N/A"}`);
 
   crit(`Silver Bullet window (now ${nyH} NY)`, isInSilverBulletWindow());
+  crit("EMA(8/21) direction established", ema8 !== ema21);
 
-  const fvg = detectFVG(candles.slice(-15));
-  crit("FVG detected in last 15 candles", !!fvg);
-  if (!fvg) return { criticalPass: false, score: 0, side: null, fvg: null, results: [...critical, ...scored] };
-
-  const inFVG = price >= fvg.bottom && price <= fvg.top;
-  crit(`Price retracing into FVG (${fvg.bottom.toFixed(2)}–${fvg.top.toFixed(2)})`, inFVG);
-  console.log(`  ℹ️  FVG: ${fvg.type.toUpperCase()} | ATR: ${atr ? atr.toFixed(2) : "N/A"}`);
-
-  // Bonus conditions
-  if (trendBias) {
-    const emaAligned = (trendBias === "bullish" && ema8 > ema21) || (trendBias === "bearish" && ema8 < ema21);
-    bonus(`15m bias ${trendBias.toUpperCase()} + 5m EMA(8/21) aligned`, emaAligned);
+  if (!critical.every(r => r.pass)) {
+    return { criticalPass: false, score: 0, side: null, fvg: null, results: [...critical, ...scored] };
   }
-  const bigCandle = atr ? (candles[candles.length - 1].high - candles[candles.length - 1].low) >= atr * 1.2 : false;
-  bonus("Displacement candle (body ≥ 1.2× ATR)", bigCandle);
+
+  const goLong = bullishEMA;
+
+  if (trendBias) {
+    bonus(`15m bias ${trendBias.toUpperCase()} aligns with EMA direction`,
+      (trendBias === "bullish" && goLong) || (trendBias === "bearish" && !goLong));
+  }
+
+  if (rsi7 !== null) {
+    const rsiPass = goLong ? (rsi7 >= 40 && rsi7 <= 80) : (rsi7 >= 20 && rsi7 <= 60);
+    bonus(`RSI(7) zone (${goLong ? "40–80" : "20–60"}): ${rsi7.toFixed(1)}`, rsiPass);
+  }
+
+  const fvg = detectFVG(candles.slice(-20));
+  if (fvg) {
+    const fvgAligned = (goLong && fvg.type === "bullish") || (!goLong && fvg.type === "bearish");
+    bonus(`FVG ${fvg.type} aligned with direction`, fvgAligned);
+  }
 
   const criticalPass = critical.every(r => r.pass);
   const score        = scored.filter(r => r.pass).length;
-  const side         = fvg.type === "bullish" ? "buy" : "sell";
-  return { criticalPass, score, side, fvg, results: [...critical, ...scored] };
+  const side         = goLong ? "buy" : "sell";
+  return { criticalPass, score, side, fvg: fvg || null, results: [...critical, ...scored] };
 }
 
 // ─── Strategy: Forex Scalp — EMA(8/21) + RSI + bias + FVG ───────────────────
@@ -567,7 +581,7 @@ async function runSymbol(symbol, log) {
   let criticalPass, score, side, fvg = null, orb = null, results;
 
   if (symbol === "XAUUSD") {
-    ({ criticalPass, score, side, fvg, results } = runSilverBulletCheck(candles, trendBias));
+    ({ criticalPass, score, side, fvg, results } = runGoldCheck(candles, trendBias));
   } else if (cls === "stock") {
     ({ criticalPass, score, side, orb, results } = runStockORBCheck(symbol, candles, trendBias));
   } else {
