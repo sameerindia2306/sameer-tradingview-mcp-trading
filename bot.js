@@ -48,10 +48,10 @@ const CONFIG = {
 
 const FOREX_SCALP_PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "GBPJPY"];
 
-const CSV_FILE       = process.env.TRADE_LOG_PATH || "trades.csv";
-const POSITIONS_FILE = "open-positions.json";
-const LOG_FILE       = "safety-check-log.json";
-const WATCHLIST_FILE = "watchlist.json";
+const CSV_FILE       = process.env.TRADE_LOG_PATH      || "trades.csv";
+const POSITIONS_FILE = process.env.POSITIONS_FILE_PATH  || "open-positions.json";
+const LOG_FILE       = process.env.SAFETY_LOG_PATH      || "safety-check-log.json";
+const WATCHLIST_FILE = process.env.WATCHLIST_FILE_PATH  || "watchlist.json";
 
 const TD_SYMBOL = {
   EURUSD: "EUR/USD", GBPUSD: "GBP/USD", USDJPY: "USD/JPY", GBPJPY: "GBP/JPY",
