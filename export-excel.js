@@ -2,7 +2,7 @@ import { readFileSync } from "fs";
 import ExcelJS from "exceljs";
 import "dotenv/config";
 
-const CSV_FILE = process.env.TRADE_LOG_PATH || "C:/Users/spathan/Desktop/sameer-trades.csv";
+const CSV_FILE = process.env.TRADE_LOG_PATH || "trades.csv";
 const OUT_FILE = CSV_FILE.replace(".csv", ".xlsx");
 
 const BLUE   = "FF1565C0";
@@ -10,6 +10,7 @@ const GREEN  = "FF34A853"; // OPEN
 const RED    = "FFD50000"; // BLOCKED
 const GOLD   = "FFFFD600"; // WIN
 const ORANGE = "FFFF6D00"; // LOSS
+const SLATE  = "FF37474F"; // DAY SUMMARY
 const WHITE  = "FFFFFFFF";
 
 const THIN_BORDER = {
@@ -18,6 +19,41 @@ const THIN_BORDER = {
   bottom: { style: "thin", color: { argb: "FFCCCCCC" } },
   right:  { style: "thin", color: { argb: "FFCCCCCC" } },
 };
+
+function groupByDayWithSummaries(dataRows) {
+  if (!dataRows.length) return [];
+  const EMPTY_ROW = new Array(19).fill(""); // 19 cols (includes Confidence)
+  const result    = [];
+
+  const byDate = new Map();
+  for (const row of dataRows) {
+    const date = row[0] || "unknown";
+    if (!byDate.has(date)) byDate.set(date, []);
+    byDate.get(date).push(row);
+  }
+
+  for (const [date, rows] of byDate) {
+    result.push(...rows);
+
+    const wins     = rows.filter(r => (r[12] || "").toUpperCase() === "WIN").length;
+    const losses   = rows.filter(r => (r[12] || "").toUpperCase() === "LOSS").length;
+    const blocked  = rows.filter(r => (r[12] || "").toUpperCase() === "BLOCKED").length;
+    const executed = rows.filter(r => ["PAPER", "LIVE"].includes((r[11] || "").toUpperCase())).length;
+    const closed   = rows.filter(r => ["WIN", "LOSS"].includes((r[12] || "").toUpperCase()));
+    const totalPnL = closed.reduce((sum, r) => sum + (parseFloat(r[16]) || 0), 0); // P&L at index 16
+    const totalFees= rows.reduce((sum, r) => sum + (parseFloat(r[9]) || 0), 0);    // Fee at index 9
+    const pnlStr   = closed.length ? (totalPnL >= 0 ? "+" : "") + totalPnL.toFixed(2) : "";
+
+    result.push([
+      date, "DAY SUMMARY", "", "── DAILY P&L ──", "", "", "", "", "",
+      totalFees > 0 ? totalFees.toFixed(4) : "",
+      "", "SUMMARY", "SUMMARY", "", "", "", pnlStr, "",
+      `${wins}W ${losses}L | ${executed} executed | ${blocked} blocked`,
+    ]);
+    result.push(EMPTY_ROW);
+  }
+  return result;
+}
 
 function getCategory(symbol) {
   const s = (symbol || "").toUpperCase().trim();
@@ -56,10 +92,25 @@ function styleSheet(workbook, tabName, headers, dataRows) {
   headerRow.height = 22;
 
   for (let i = 0; i < dataRows.length; i++) {
-    const row = sheet.addRow(dataRows[i]);
-    row.height = 18;
-    const status = (dataRows[i][12] || "").toUpperCase();
+    const mode    = (dataRows[i][11] || "").toUpperCase();
+    const status  = (dataRows[i][12] || "").toUpperCase();
+    const isBlank = dataRows[i].every(c => !c);
+    const row     = sheet.addRow(dataRows[i]);
 
+    if (isBlank) { row.height = 10; continue; }
+
+    if (mode === "SUMMARY") {
+      row.height = 22;
+      row.eachCell({ includeEmpty: true }, cell => {
+        cell.fill      = { type: "pattern", pattern: "solid", fgColor: { argb: SLATE } };
+        cell.font      = { bold: true, color: { argb: WHITE } };
+        cell.alignment = { vertical: "middle" };
+        cell.border    = THIN_BORDER;
+      });
+      continue;
+    }
+
+    row.height = 18;
     let bgColor = null;
     let fontColor = "FF000000";
     if      (status === "OPEN")    { bgColor = GREEN;  fontColor = "FF000000"; }
@@ -75,7 +126,7 @@ function styleSheet(workbook, tabName, headers, dataRows) {
         cell.fill = { type: "pattern", pattern: "solid", fgColor: { argb: i % 2 === 0 ? "FFF5F5F5" : WHITE } };
       }
       cell.alignment = { vertical: "middle" };
-      cell.border = THIN_BORDER;
+      cell.border    = THIN_BORDER;
     });
   }
 
@@ -101,11 +152,11 @@ async function main() {
 
   const workbook = new ExcelJS.Workbook();
 
-  styleSheet(workbook, "All Trades", headers, dataRows);
-  styleSheet(workbook, "CRYPTO", headers, byCategory.CRYPTO);
-  styleSheet(workbook, "FOREX",  headers, byCategory.FOREX);
-  styleSheet(workbook, "GOLD",   headers, byCategory.GOLD);
-  styleSheet(workbook, "TECH",   headers, byCategory.TECH);
+  styleSheet(workbook, "All Trades", headers, groupByDayWithSummaries(dataRows));
+  styleSheet(workbook, "CRYPTO", headers, groupByDayWithSummaries(byCategory.CRYPTO));
+  styleSheet(workbook, "FOREX",  headers, groupByDayWithSummaries(byCategory.FOREX));
+  styleSheet(workbook, "GOLD",   headers, groupByDayWithSummaries(byCategory.GOLD));
+  styleSheet(workbook, "TECH",   headers, groupByDayWithSummaries(byCategory.TECH));
 
   await workbook.xlsx.writeFile(OUT_FILE);
 

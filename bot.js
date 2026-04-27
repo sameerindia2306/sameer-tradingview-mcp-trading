@@ -554,6 +554,20 @@ function writeCloseCsv(closed) {
   console.log(`  ${closed.result === "WIN" ? "✅ WIN" : "❌ LOSS"} ${closed.symbol} | P&L: $${closed.pnlUSD.toFixed(4)} (${closed.pnlPct.toFixed(2)}%) | ${closed.confidence ?? ""}`);
 }
 
+// ─── Skip/Error CSV logging ───────────────────────────────────────────────────
+
+const CSV_HEADERS_LINE = "Date,Time (UTC),Broker,Symbol,Asset Class,Side,Quantity,Entry Price,Total USD,Fee (est.),Order ID,Mode,Status,Confidence,Exit Price,Exit Time,P&L USD,P&L %,Notes";
+
+function writeSkipCsv(symbol, reason) {
+  const now  = new Date();
+  const date = now.toISOString().slice(0, 10);
+  const time = now.toISOString().slice(11, 19);
+  const cls  = assetClass(symbol);
+  const row  = [date, time, "Pepperstone", symbol, cls, "", "", "", "", "", "", "SKIP", "SKIP", "", "", "", "", "", `"${reason}"`].join(",");
+  if (!existsSync(CSV_FILE)) writeFileSync(CSV_FILE, CSV_HEADERS_LINE + "\n");
+  appendFileSync(CSV_FILE, row + "\n");
+}
+
 // ─── Per-Symbol Run ───────────────────────────────────────────────────────────
 
 async function runSymbol(symbol, log) {
@@ -562,12 +576,16 @@ async function runSymbol(symbol, log) {
 
   if (!isActiveSession(cls)) {
     console.log(`  ⏸  Outside active session — skipping`);
-    return;
+    return; // session skips are not logged (too noisy outside market hours)
   }
 
   let candles;
   try { candles = await fetchCandles(symbol, 100, "5m"); }
-  catch (err) { console.log(`  ⚠️  Data error: ${err.message}`); return; }
+  catch (err) {
+    console.log(`  ⚠️  Data error: ${err.message}`);
+    writeSkipCsv(symbol, `Data error: ${err.message}`);
+    return;
+  }
 
   const price = candles[candles.length - 1].close;
   const atr   = calcATR(candles, 14);
@@ -626,6 +644,9 @@ async function runSymbol(symbol, log) {
 
   log.trades.push(entry);
   writeTradeCsv(entry);
+
+  // Sync to Sheets after each trade so Railway restarts don't lose the cycle's data
+  await syncToSheets().catch(err => console.log(`  ⚠️  Sheets: ${err.message}`));
 }
 
 // ─── Main Loop ────────────────────────────────────────────────────────────────
@@ -678,7 +699,6 @@ async function run() {
 
   saveLog(log);
   await exportToExcel().catch(err => console.log(`  ⚠️  Excel: ${err.message}`));
-  await syncToSheets().catch(err => console.log(`  ⚠️  Sheets: ${err.message}`));
   console.log("\n═══════════════════════════════════════════════════════════\n");
 }
 
