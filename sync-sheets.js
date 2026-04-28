@@ -54,7 +54,14 @@ function getCategory(symbol) {
 
 async function getAuth() {
   let creds;
-  if (process.env.GOOGLE_CREDENTIALS_JSON) {
+  if (process.env.GOOGLE_CLIENT_EMAIL && process.env.GOOGLE_PRIVATE_KEY) {
+    // Individual env vars — most reliable on Railway (no JSON/base64 corruption)
+    creds = {
+      type: "service_account",
+      client_email: process.env.GOOGLE_CLIENT_EMAIL,
+      private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+    };
+  } else if (process.env.GOOGLE_CREDENTIALS_JSON) {
     const jsonStr = process.env.GOOGLE_CREDENTIALS_JSON.replace(/\r/g, "").replace(/\n/g, "\\n");
     creds = JSON.parse(jsonStr);
   } else if (process.env.GOOGLE_CREDENTIALS_B64) {
