@@ -722,18 +722,15 @@ async function startup() {
   initCsv();
   console.log(`  CSV file             : ✅ Ready (${CSV_FILE})`);
 
-  if (process.env.GOOGLE_SHEET_ID) {
-    try {
-      await syncToSheets();
-      console.log("  Google Sheets        : ✅ Connected");
-    } catch (err) {
-      console.log(`  Google Sheets        : ❌ FAILED — ${err.message}`);
-    }
-  } else {
-    console.log("  Google Sheets        : ⏭  Skipped (GOOGLE_SHEET_ID not set)");
-  }
-
   console.log("═══════════════════════════════════════════════════════════");
+
+  // Test Sheets in background — never block bot startup
+  if (process.env.GOOGLE_SHEET_ID) {
+    const timeout = new Promise((_, reject) => setTimeout(() => reject(new Error("timeout after 15s")), 15000));
+    Promise.race([syncToSheets(), timeout])
+      .then(() => console.log("  Google Sheets        : ✅ Connected"))
+      .catch(err => console.log(`  Google Sheets        : ❌ FAILED — ${err.message}`));
+  }
 }
 
 let lastHeartbeatHour = -1;
