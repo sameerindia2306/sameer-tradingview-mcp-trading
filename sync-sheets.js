@@ -55,7 +55,8 @@ function getCategory(symbol) {
 async function getAuth() {
   let creds;
   if (process.env.GOOGLE_CREDENTIALS_JSON) {
-    creds = JSON.parse(process.env.GOOGLE_CREDENTIALS_JSON);
+    const jsonStr = process.env.GOOGLE_CREDENTIALS_JSON.replace(/\r/g, "").replace(/\n/g, "\\n");
+    creds = JSON.parse(jsonStr);
   } else if (process.env.GOOGLE_CREDENTIALS_B64) {
     const b64 = process.env.GOOGLE_CREDENTIALS_B64.replace(/\s+/g, "");
     creds = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
