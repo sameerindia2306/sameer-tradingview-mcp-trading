@@ -711,7 +711,9 @@ async function startup() {
   console.log("─── Environment Check ─────────────────────────────────────");
   console.log(`  TWELVE_DATA_API_KEY  : ${CONFIG.tdApiKey        ? "✅ SET" : "❌ MISSING"}`);
   console.log(`  GOOGLE_SHEET_ID      : ${process.env.GOOGLE_SHEET_ID         ? "✅ SET" : "❌ MISSING"}`);
-  console.log(`  GOOGLE_CREDENTIALS_B64: ${process.env.GOOGLE_CREDENTIALS_B64 ? "✅ SET" : "❌ MISSING (or GOOGLE_CREDENTIALS_PATH)"}`);
+  console.log(`  GOOGLE_CREDENTIALS_JSON: ${process.env.GOOGLE_CREDENTIALS_JSON ? "✅ SET" : "❌ MISSING"}`);
+  console.log(`  GOOGLE_CREDENTIALS_B64 : ${process.env.GOOGLE_CREDENTIALS_B64 ? "✅ SET (fallback)" : "❌ not set"}`);
+
   console.log(`  PAPER_TRADING        : ${CONFIG.paperTrading ? "YES (safe)" : "NO — LIVE TRADES"}`);
   console.log(`  PORTFOLIO_VALUE_USD  : $${CONFIG.portfolioValue}`);
   console.log(`  MAX_TRADES_PER_DAY   : ${CONFIG.maxTradesPerDay}`);
