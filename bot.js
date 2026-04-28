@@ -733,6 +733,57 @@ async function startup() {
   }
 }
 
+// ─── End-of-Day Summary ───────────────────────────────────────────────────────
+
+let lastEodDate = "";
+
+function writeEodCsv(date) {
+  if (!existsSync(CSV_FILE)) return;
+  const lines = readFileSync(CSV_FILE, "utf8").trim().split("\n").slice(1)
+    .filter(l => l.startsWith(date) && !l.includes(",EOD,"));
+  const cols = lines.map(l => {
+    const parts = []; let cur = "", inQ = false;
+    for (const ch of l) {
+      if (ch === '"') { inQ = !inQ; }
+      else if (ch === "," && !inQ) { parts.push(cur); cur = ""; }
+      else cur += ch;
+    }
+    parts.push(cur); return parts;
+  });
+  const wins     = cols.filter(r => (r[12]||"").toUpperCase() === "WIN").length;
+  const losses   = cols.filter(r => (r[12]||"").toUpperCase() === "LOSS").length;
+  const blocked  = cols.filter(r => (r[12]||"").toUpperCase() === "BLOCKED").length;
+  const executed = cols.filter(r => ["OPEN","WIN","LOSS"].includes((r[12]||"").toUpperCase())).length;
+  const totalPnL  = cols.reduce((s, r) => s + (parseFloat(r[16]) || 0), 0);
+  const totalFees = cols.reduce((s, r) => s + (parseFloat(r[9])  || 0), 0);
+  const pnlStr    = (totalPnL >= 0 ? "+" : "") + totalPnL.toFixed(2);
+  const time      = new Date().toISOString().slice(11, 19);
+  const row = [
+    date, time, "Pepperstone", "── EOD SUMMARY ──", "", "", "", "", "",
+    totalFees.toFixed(4), "", "EOD", "EOD", "",
+    "", "", pnlStr, "",
+    `"${wins}W ${losses}L | ${executed} executed | ${blocked} blocked | Fees: $${totalFees.toFixed(4)}"`,
+  ].join(",");
+  appendFileSync(CSV_FILE, row + "\n");
+  appendFileSync(CSV_FILE, new Array(19).fill("").join(",") + "\n"); // blank separator
+  console.log(`[EOD ${date}] ${wins}W ${losses}L | P&L: $${pnlStr} | Fees: $${totalFees.toFixed(4)}`);
+}
+
+async function eodRoutine() {
+  const utcDay = new Date().getUTCDay();
+  const utcH   = getUTCHour();
+  const today  = new Date().toISOString().slice(0, 10);
+  if (utcDay < 1 || utcDay > 5) return;       // weekdays only
+  if (utcH < 15.583) return;                  // after 15:35 UTC (NY close + 5 min)
+  if (lastEodDate === today) return;           // only once per day
+  lastEodDate = today;
+  console.log(`\n[EOD ${today}] Market closed — writing daily summary...`);
+  initCsv();
+  writeEodCsv(today);
+  await syncToSheets().catch(err => console.log(`[EOD] Sheets sync failed: ${err.message}`));
+  await exportToExcel().catch(err => console.log(`[EOD] Excel failed: ${err.message}`));
+}
+
 let lastHeartbeatHour = -1;
 
 async function loop() {
@@ -742,6 +793,7 @@ async function loop() {
     const utcH = getUTCHour();
     console.log(`[HEARTBEAT ${new Date().toISOString()}] Bot alive | UTC ${utcH.toFixed(1)}h | Day: ${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][new Date().getUTCDay()]}`);
   }
+  await eodRoutine();
   await run().catch(err => console.error("Cycle error:", err));
   setTimeout(loop, RUN_INTERVAL_MS);
 }

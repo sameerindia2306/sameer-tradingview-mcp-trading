@@ -137,6 +137,23 @@ function buildFormatRequests(sheetId, rows) {
 
     if (isBlank) continue;
 
+    // EOD summary row — deep purple background, gold bold text
+    if (mode === "EOD") {
+      requests.push({
+        repeatCell: {
+          range: { sheetId, startRowIndex: i, endRowIndex: i + 1 },
+          cell: {
+            userEnteredFormat: {
+              backgroundColor: { red: 0.290, green: 0.000, blue: 0.510 }, // deep purple
+              textFormat: { bold: true, fontSize: 11, foregroundColor: { red: 1.000, green: 0.843, blue: 0.000 } }, // gold text
+            },
+          },
+          fields: "userEnteredFormat(backgroundColor,textFormat)",
+        },
+      });
+      continue;
+    }
+
     if (mode === "SUMMARY") {
       requests.push({
         repeatCell: {
