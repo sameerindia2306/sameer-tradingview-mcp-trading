@@ -59,7 +59,7 @@ async function getAuth() {
     creds = {
       type: "service_account",
       client_email: process.env.GOOGLE_CLIENT_EMAIL,
-      private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, "\n"),
+      private_key: process.env.GOOGLE_PRIVATE_KEY.replace(/\r/g, "").replace(/\\n/g, "\n"),
     };
   } else if (process.env.GOOGLE_CREDENTIALS_JSON) {
     const jsonStr = process.env.GOOGLE_CREDENTIALS_JSON.replace(/\r/g, "").replace(/\n/g, "\\n");
