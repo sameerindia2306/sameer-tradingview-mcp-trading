@@ -54,8 +54,14 @@ function getCategory(symbol) {
 
 async function getAuth() {
   let creds;
-  if (process.env.GOOGLE_CLIENT_EMAIL && process.env.GOOGLE_PRIVATE_KEY) {
-    // Individual env vars — most reliable on Railway (no JSON/base64 corruption)
+  if (process.env.GOOGLE_CLIENT_EMAIL && process.env.GOOGLE_PRIVATE_KEY_B64) {
+    // Private key stored as base64 — Railway can't corrupt pure base64 chars
+    creds = {
+      type: "service_account",
+      client_email: process.env.GOOGLE_CLIENT_EMAIL,
+      private_key: Buffer.from(process.env.GOOGLE_PRIVATE_KEY_B64.replace(/\s+/g, ""), "base64").toString("utf8"),
+    };
+  } else if (process.env.GOOGLE_CLIENT_EMAIL && process.env.GOOGLE_PRIVATE_KEY) {
     creds = {
       type: "service_account",
       client_email: process.env.GOOGLE_CLIENT_EMAIL,
