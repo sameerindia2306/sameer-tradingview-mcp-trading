@@ -704,9 +704,47 @@ async function run() {
 
 const RUN_INTERVAL_MS = 5 * 60 * 1000;
 
+async function startup() {
+  console.log("═══════════════════════════════════════════════════════════");
+  console.log("  Sameer Bot — STARTING UP");
+  console.log(`  ${new Date().toISOString()}`);
+  console.log("─── Environment Check ─────────────────────────────────────");
+  console.log(`  TWELVE_DATA_API_KEY  : ${CONFIG.tdApiKey        ? "✅ SET" : "❌ MISSING"}`);
+  console.log(`  GOOGLE_SHEET_ID      : ${process.env.GOOGLE_SHEET_ID         ? "✅ SET" : "❌ MISSING"}`);
+  console.log(`  GOOGLE_CREDENTIALS_B64: ${process.env.GOOGLE_CREDENTIALS_B64 ? "✅ SET" : "❌ MISSING (or GOOGLE_CREDENTIALS_PATH)"}`);
+  console.log(`  PAPER_TRADING        : ${CONFIG.paperTrading ? "YES (safe)" : "NO — LIVE TRADES"}`);
+  console.log(`  PORTFOLIO_VALUE_USD  : $${CONFIG.portfolioValue}`);
+  console.log(`  MAX_TRADES_PER_DAY   : ${CONFIG.maxTradesPerDay}`);
+  console.log("─── Connectivity Test ─────────────────────────────────────");
+
+  initCsv();
+  console.log(`  CSV file             : ✅ Ready (${CSV_FILE})`);
+
+  if (process.env.GOOGLE_SHEET_ID) {
+    try {
+      await syncToSheets();
+      console.log("  Google Sheets        : ✅ Connected");
+    } catch (err) {
+      console.log(`  Google Sheets        : ❌ FAILED — ${err.message}`);
+    }
+  } else {
+    console.log("  Google Sheets        : ⏭  Skipped (GOOGLE_SHEET_ID not set)");
+  }
+
+  console.log("═══════════════════════════════════════════════════════════");
+}
+
+let lastHeartbeatHour = -1;
+
 async function loop() {
+  const currentHour = new Date().getUTCHours();
+  if (currentHour !== lastHeartbeatHour) {
+    lastHeartbeatHour = currentHour;
+    const utcH = getUTCHour();
+    console.log(`[HEARTBEAT ${new Date().toISOString()}] Bot alive | UTC ${utcH.toFixed(1)}h | Day: ${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][new Date().getUTCDay()]}`);
+  }
   await run().catch(err => console.error("Cycle error:", err));
   setTimeout(loop, RUN_INTERVAL_MS);
 }
 
-loop();
+startup().then(() => loop());
