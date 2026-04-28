@@ -55,7 +55,8 @@ function getCategory(symbol) {
 async function getAuth() {
   let creds;
   if (process.env.GOOGLE_CREDENTIALS_B64) {
-    creds = JSON.parse(Buffer.from(process.env.GOOGLE_CREDENTIALS_B64, "base64").toString("utf8"));
+    const b64 = process.env.GOOGLE_CREDENTIALS_B64.replace(/\s+/g, "");
+    creds = JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
   } else {
     creds = JSON.parse(readFileSync(CREDS_PATH, "utf8"));
   }
